@@ -294,4 +294,3 @@ echo "    sudo sed -i 's/REPLACE_ME/<YOUR_BOT_TOKEN>/' /etc/tg-guard/config.yaml
 echo "    sudo systemctl daemon-reload"
 echo "    sudo systemctl enable --now tg-guard"
 echo "    sudo systemctl status tg-guard --no-pager"
-EOF
