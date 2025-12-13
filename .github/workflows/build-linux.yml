@@ -64,7 +64,6 @@ jobs:
           set -euo pipefail
           dnf -y update
 
-          # Rust build deps + OpenSSL headers + RPM build deps
           dnf -y install \
             git ca-certificates curl \
             gcc gcc-c++ make \
@@ -130,9 +129,9 @@ jobs:
 
           ARCHIVE="tg-guard-${VERSION}-${{ matrix.arch_label }}.tar.gz"
           (cd dist && tar -czf "$ARCHIVE" "${{ matrix.arch_label }}")
-          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
 
       - name: Build RPM (package-rhel.sh)
+        if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -146,22 +145,24 @@ jobs:
           mkdir -p "$OUTDIR"
 
           if [ -d "$HOME/rpmbuild/RPMS" ]; then
-            find "$HOME/rpmbuild/RPMS" -type f -name "*.rpm" -print -exec cp -v {} "$OUTDIR/" \;
+            find "$HOME/rpmbuild/RPMS" -type f -name "*.rpm" -exec cp -v {} "$OUTDIR/" \;
           fi
 
-          find . -maxdepth 5 -type f -name "*.rpm" -print | head -n 50 || true
+          test -n "$(ls -1 "$OUTDIR"/*.rpm 2>/dev/null)"
 
-          ls -lah "$OUTDIR" || true
-          test -n "$(ls -1 "$OUTDIR"/*.rpm 2>/dev/null || true)"
-
-
-      - name: Upload artifacts (tar.gz + rpm)
+      - name: Upload artifact (tar.gz)
         uses: actions/upload-artifact@v4
         with:
           name: tg-guard-${{ env.VERSION }}-${{ matrix.arch_label }}
-          path: |
-            dist/tg-guard-${{ env.VERSION }}-${{ matrix.arch_label }}.tar.gz
-            dist/${{ matrix.arch_label }}/*.rpm
+          path: dist/tg-guard-${{ env.VERSION }}-${{ matrix.arch_label }}.tar.gz
+          if-no-files-found: error
+
+      - name: Upload artifact (rpm)
+        if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: tg-guard-${{ env.VERSION }}-${{ matrix.arch_label }}-rpm
+          path: dist/${{ matrix.arch_label }}/*.rpm
           if-no-files-found: error
 
   release:
@@ -180,7 +181,6 @@ jobs:
             TAG="${GITHUB_REF_NAME}"
           fi
           echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
-          echo "Release tag = $TAG"
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
