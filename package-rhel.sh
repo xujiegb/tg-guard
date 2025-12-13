@@ -4,7 +4,6 @@ set -euo pipefail
 # Use:
 #   ./package-rhel.sh --version 0.0.1
 
-
 die() { echo "ERROR: $*" >&2; exit 1; }
 
 need_cmd() {
@@ -169,6 +168,16 @@ fi
 cp -f "$BIN" "${TOPBUILD}/${PKGNAME}"
 chmod 0755 "${TOPBUILD}/${PKGNAME}"
 
+if [[ -f "$ROOT_DIR/LICENSE" ]]; then
+  cp -f "$ROOT_DIR/LICENSE" "${TOPBUILD}/LICENSE"
+fi
+for f in README README.md README.txt; do
+  if [[ -f "$ROOT_DIR/$f" ]]; then
+    cp -f "$ROOT_DIR/$f" "${TOPBUILD}/$f"
+  fi
+done
+# -----------------------------------------------------------------------------------------------
+
 TARBALL="${RPMTOP}/SOURCES/${PKGNAME}-${VERSION}.tar.gz"
 echo "[*] Creating source tarball: $TARBALL"
 tar -C "${RPMTOP}/BUILD" -czf "$TARBALL" "${PKGNAME}-${VERSION}"
@@ -208,6 +217,9 @@ URL:            https://github.com/xujiegb/tg-guard
 Source0:        %{name}-%{version}.tar.gz
 
 # We ship a prebuilt binary in Source0, so rpmbuild does not need Rust toolchain.
+# Also disable debug/debuginfo subpackages (prebuilt binary often yields empty debugsource list).
+%global debug_package %{nil}
+
 BuildArch:      %{_arch}
 
 # Runtime deps (openssl-sys typically links dynamically to libssl/libcrypto)
