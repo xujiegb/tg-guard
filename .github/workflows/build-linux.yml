@@ -51,21 +51,29 @@ jobs:
           else
             VERSION="dev-${GITHUB_SHA::7}"
           fi
+
+          RPM_VERSION="${VERSION#v}"
+
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-          echo "Resolved VERSION=$VERSION"
+          echo "RPM_VERSION=$RPM_VERSION" >> "$GITHUB_ENV"
+          echo "Resolved VERSION=$VERSION ; RPM_VERSION=$RPM_VERSION"
 
       - name: Install build dependencies (UBI10)
         shell: bash
         run: |
           set -euo pipefail
           dnf -y update
+
+          # Rust build deps + OpenSSL headers + RPM build deps
           dnf -y install \
             git ca-certificates curl \
             gcc gcc-c++ make \
             pkgconf-pkg-config openssl-devel \
             perl \
             tar gzip findutils which \
-            libstdc++-devel
+            libstdc++-devel \
+            rpm-build rpmdevtools redhat-rpm-config
+
           dnf -y clean all
 
       - name: Checkout
@@ -124,11 +132,36 @@ jobs:
           (cd dist && tar -czf "$ARCHIVE" "${{ matrix.arch_label }}")
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
 
-      - name: Upload artifact
+      - name: Build RPM (package-rhel.sh)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f ./package-rhel.sh
+          chmod +x ./package-rhel.sh
+
+          ./package-rhel.sh --version "${RPM_VERSION}"
+
+          OUTDIR="dist/${{ matrix.arch_label }}"
+          mkdir -p "$OUTDIR"
+
+          if [ -d "$HOME/rpmbuild/RPMS" ]; then
+            find "$HOME/rpmbuild/RPMS" -type f -name "*.rpm" -print -exec cp -v {} "$OUTDIR/" \;
+          fi
+
+          find . -maxdepth 5 -type f -name "*.rpm" -print | head -n 50 || true
+
+          ls -lah "$OUTDIR" || true
+          test -n "$(ls -1 "$OUTDIR"/*.rpm 2>/dev/null || true)"
+
+
+      - name: Upload artifacts (tar.gz + rpm)
         uses: actions/upload-artifact@v4
         with:
           name: tg-guard-${{ env.VERSION }}-${{ matrix.arch_label }}
-          path: dist/tg-guard-${{ env.VERSION }}-${{ matrix.arch_label }}.tar.gz
+          path: |
+            dist/tg-guard-${{ env.VERSION }}-${{ matrix.arch_label }}.tar.gz
+            dist/${{ matrix.arch_label }}/*.rpm
           if-no-files-found: error
 
   release:
@@ -162,3 +195,4 @@ jobs:
           generate_release_notes: true
           files: |
             dist/**/tg-guard-*.tar.gz
+            dist/**/*.rpm
