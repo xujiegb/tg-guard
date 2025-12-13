@@ -227,11 +227,22 @@ struct GroupConfig {
     name: String,
     chat_id: i64,
     ignore_admins: Option<bool>,
-    join_verification: JoinVerification,
+
+    // ✅ 可有可无：不写就 None（不执行加群验证）
+    #[serde(default)]
+    join_verification: Option<JoinVerification>,
+
+    // ✅ 可有可无：不写就当 []
+    #[serde(default)]
     auto_replies: Vec<TextRule>,
+    #[serde(default)]
     warnings: Vec<WarningRule>,
+    #[serde(default)]
     kicks: Vec<KickRule>,
-    commands: Commands,
+
+    // ✅ 可有可无：不写就 None（不执行群命令）
+    #[serde(default)]
+    commands: Option<Commands>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -381,36 +392,38 @@ fn validate_config(cfg: &Config) -> Result<()> {
             ));
         }
 
-        if g.join_verification.enabled {
-            if g.join_verification.timeout_secs < 5 || g.join_verification.timeout_secs > 24 * 3600
-            {
-                return Err(anyhow!(
-                    "group '{}' timeout_secs={} out of range (5..=86400)",
-                    g.name,
-                    g.join_verification.timeout_secs
-                ));
-            }
-            if g.join_verification.questions.is_empty() {
-                return Err(anyhow!(
-                    "group '{}' join_verification.questions is empty but enabled=true",
-                    g.name
-                ));
-            }
-            for q in &g.join_verification.questions {
-                if q.options.is_empty() {
+        // ✅ join_verification 可选：只有存在且 enabled 才校验
+        if let Some(jv) = &g.join_verification {
+            if jv.enabled {
+                if jv.timeout_secs < 5 || jv.timeout_secs > 24 * 3600 {
                     return Err(anyhow!(
-                        "group '{}' question '{}' options is empty",
+                        "group '{}' timeout_secs={} out of range (5..=86400)",
                         g.name,
-                        q.id
+                        jv.timeout_secs
                     ));
                 }
-                if !q.options.iter().any(|x| x == &q.answer) {
+                if jv.questions.is_empty() {
                     return Err(anyhow!(
-                        "group '{}' question '{}' answer not found in options (answer='{}')",
-                        g.name,
-                        q.id,
-                        q.answer
+                        "group '{}' join_verification.questions is empty but enabled=true",
+                        g.name
                     ));
+                }
+                for q in &jv.questions {
+                    if q.options.is_empty() {
+                        return Err(anyhow!(
+                            "group '{}' question '{}' options is empty",
+                            g.name,
+                            q.id
+                        ));
+                    }
+                    if !q.options.iter().any(|x| x == &q.answer) {
+                        return Err(anyhow!(
+                            "group '{}' question '{}' answer not found in options (answer='{}')",
+                            g.name,
+                            q.id,
+                            q.answer
+                        ));
+                    }
                 }
             }
         }
@@ -992,13 +1005,25 @@ async fn flush_group_notice(bot: &Bot, state: &AppState) -> Result<()> {
         let slowest = buf.users.last().map(|(_, n)| n.clone()).unwrap_or_default();
 
         if let Some(gs) = state.groups.get(gid) {
+            // ✅ 没有 join_verification 就不发入群验证提示
+            let Some(jv) = gs.cfg.join_verification.as_ref() else {
+                buf.users.clear();
+                buf.last_sent = now;
+                continue;
+            };
+            if !jv.enabled {
+                buf.users.clear();
+                buf.last_sent = now;
+                continue;
+            }
+
             let mut vars = HashMap::new();
             vars.insert("names", names_text);
             vars.insert("bot_username", format!("@{}", state.bot_username));
             vars.insert("group_name", gs.cfg.name.clone());
             vars.insert("slowest", slowest);
 
-            let text = format_template(&gs.cfg.join_verification.group_notice_template, &vars);
+            let text = format_template(&jv.group_notice_template, &vars);
             let _ = api_log("send_message", bot.send_message(*gid, text)).await;
         }
 
@@ -1032,9 +1057,13 @@ fn build_keyboard(gid: ChatId, options: &[String]) -> InlineKeyboardMarkup {
 }
 
 fn pick_and_shuffle_question(gs: &GroupState) -> Result<(Question, Vec<String>, usize)> {
-    let q = gs
+    let jv = gs
         .cfg
         .join_verification
+        .as_ref()
+        .context("join_verification is missing")?;
+
+    let q = jv
         .questions
         .choose(&mut rand::thread_rng())
         .context("questions empty")?
@@ -1069,14 +1098,18 @@ async fn send_or_edit_question_dm(
     attempts_left: u32,
     edit_target: Option<(ChatId, MessageId)>,
 ) {
+    let Some(jv) = gs.cfg.join_verification.as_ref() else {
+        return;
+    };
+
     let mut vars = HashMap::new();
     vars.insert("group_name", gs.cfg.name.clone());
-    vars.insert("timeout_secs", gs.cfg.join_verification.timeout_secs.to_string());
-    let intro = format_template(&gs.cfg.join_verification.dm_intro, &vars);
+    vars.insert("timeout_secs", jv.timeout_secs.to_string());
+    let intro = format_template(&jv.dm_intro, &vars);
 
     let mut text = format!("{}\n\n{}", intro, q.prompt);
 
-    if gs.cfg.join_verification.max_attempts > 0 {
+    if jv.max_attempts > 0 {
         text.push_str(&format!("\n\n剩余重试次数：{}", attempts_left));
     }
 
@@ -1118,7 +1151,10 @@ async fn send_or_edit_question_dm(
 async fn handle_new_members(bot: &Bot, state: &AppState, msg: &Message) -> Result<()> {
     let chat_id = msg.chat.id;
     let Some(gs) = state.groups.get(&chat_id) else { return Ok(()); };
-    if !gs.cfg.join_verification.enabled {
+
+    // ✅ 没有 join_verification / 或 enabled=false 就完全不做加群验证
+    let Some(jv) = gs.cfg.join_verification.as_ref() else { return Ok(()); };
+    if !jv.enabled {
         return Ok(());
     }
 
@@ -1132,7 +1168,7 @@ async fn handle_new_members(bot: &Bot, state: &AppState, msg: &Message) -> Resul
             continue;
         }
 
-        let perms = perms_from_cfg(&gs.cfg.join_verification.restrict);
+        let perms = perms_from_cfg(&jv.restrict);
         let _ = api_log(
             "restrict_chat_member",
             bot.restrict_chat_member(chat_id, u.id, perms),
@@ -1141,8 +1177,7 @@ async fn handle_new_members(bot: &Bot, state: &AppState, msg: &Message) -> Resul
 
         let (q, shuffled, correct_index) = pick_and_shuffle_question(gs)?;
 
-        let expires_at =
-            Utc::now() + chrono::Duration::seconds(gs.cfg.join_verification.timeout_secs as i64);
+        let expires_at = Utc::now() + chrono::Duration::seconds(jv.timeout_secs as i64);
 
         gs.verify.insert(
             (chat_id, u.id),
@@ -1150,7 +1185,7 @@ async fn handle_new_members(bot: &Bot, state: &AppState, msg: &Message) -> Resul
                 question_id: q.id.clone(),
                 shuffled_options: shuffled.clone(),
                 correct_index,
-                attempts_left: gs.cfg.join_verification.max_attempts,
+                attempts_left: jv.max_attempts,
                 expires_at,
             },
         );
@@ -1166,7 +1201,7 @@ async fn handle_new_members(bot: &Bot, state: &AppState, msg: &Message) -> Resul
             gs,
             &q,
             &shuffled,
-            gs.cfg.join_verification.max_attempts,
+            jv.max_attempts,
             None,
         )
         .await;
@@ -1229,14 +1264,16 @@ async fn process_callback_correct(
     )
     .await;
 
-    if let Some(w) = &gs.cfg.join_verification.on_pass.welcome_dm {
-        let _ = api_log("send_message", bot.send_message(ChatId(uid.0 as i64), w.clone())).await;
-    } else {
-        let _ = api_log(
-            "send_message",
-            bot.send_message(ChatId(uid.0 as i64), "验证通过，已解除限制。"),
-        )
-        .await;
+    if let Some(jv) = gs.cfg.join_verification.as_ref() {
+        if let Some(w) = &jv.on_pass.welcome_dm {
+            let _ = api_log("send_message", bot.send_message(ChatId(uid.0 as i64), w.clone())).await;
+        } else {
+            let _ = api_log(
+                "send_message",
+                bot.send_message(ChatId(uid.0 as i64), "验证通过，已解除限制。"),
+            )
+            .await;
+        }
     }
 
     persist_group_async(gs, data_dir).await;
@@ -1271,7 +1308,14 @@ async fn process_callback_wrong(
     qcfg: Question,
     data_dir: &str,
 ) -> Result<()> {
-    if gs.cfg.join_verification.max_attempts == 0 || sess.attempts_left == 0 {
+    let max_attempts = gs
+        .cfg
+        .join_verification
+        .as_ref()
+        .map(|jv| jv.max_attempts)
+        .unwrap_or(0);
+
+    if max_attempts == 0 || sess.attempts_left == 0 {
         let _ = apply_fail(bot, gs, gid, uid, "回答错误").await;
 
         persist_group_async(gs, data_dir).await;
@@ -1358,6 +1402,24 @@ async fn handle_callback_query(bot: &Bot, state: &AppState, q: CallbackQuery) ->
         return Ok(());
     };
 
+    // ✅ 没有 join_verification 就不处理回调
+    let Some(jv) = gs.cfg.join_verification.as_ref() else {
+        let _ = api_log(
+            "answer_callback_query",
+            bot.answer_callback_query(q.id).text("本群未启用入群验证。"),
+        )
+        .await;
+        return Ok(());
+    };
+    if !jv.enabled {
+        let _ = api_log(
+            "answer_callback_query",
+            bot.answer_callback_query(q.id).text("本群未启用入群验证。"),
+        )
+        .await;
+        return Ok(());
+    }
+
     let key = (gid, uid);
 
     let Some((_k, sess)) = gs.verify.remove(&key) else {
@@ -1392,9 +1454,7 @@ async fn handle_callback_query(bot: &Bot, state: &AppState, q: CallbackQuery) ->
         return Ok(());
     }
 
-    let qcfg = gs
-        .cfg
-        .join_verification
+    let qcfg = jv
         .questions
         .iter()
         .find(|qq| qq.id == sess.question_id)
@@ -1425,20 +1485,23 @@ async fn handle_callback_query(bot: &Bot, state: &AppState, q: CallbackQuery) ->
 }
 
 async fn apply_fail(bot: &Bot, gs: &GroupState, gid: ChatId, uid: UserId, why: &str) -> Result<()> {
-    let reason = gs
-        .cfg
-        .join_verification
+    let Some(jv) = gs.cfg.join_verification.as_ref() else {
+        // 没有验证配置：理论上不会走到这里，直接静默
+        return Ok(());
+    };
+
+    let reason = jv
         .on_fail
         .reason
         .clone()
         .unwrap_or_else(|| why.to_string());
 
-    match gs.cfg.join_verification.on_fail.action {
+    match jv.on_fail.action {
         PunishmentAction::Kick => {
             let _ = api_log("kick_chat_member", bot.kick_chat_member(gid, uid)).await;
         }
         PunishmentAction::Ban => {
-            let minutes = gs.cfg.join_verification.on_fail.ban_minutes.unwrap_or(0);
+            let minutes = jv.on_fail.ban_minutes.unwrap_or(0);
             if minutes <= 0 {
                 let _ = api_log("ban_chat_member", bot.ban_chat_member(gid, uid)).await;
             } else {
@@ -1492,37 +1555,40 @@ async fn handle_group_message(bot: &Bot, state: &AppState, msg: &Message) -> Res
         }
     }
 
-    if gs.cfg.commands.enabled.unwrap_or(true) {
-        if let Some(text) = msg.text() {
-            let prefix = gs.cfg.commands.prefix.clone().unwrap_or("/".into());
-            if text.starts_with(prefix.as_str()) {
-                if gs.cfg.commands.admin_only.unwrap_or(true) {
-                    if let Some(from) = msg.from.as_ref() {
-                        if gs.admins.is_empty() {
-                            let _ = refresh_admins(bot, gs).await;
-                        }
-                        if !is_admin(gs, from.id).await {
-                            return Ok(());
+    // ✅ commands 可选：不写就不处理任何群命令
+    if let Some(cmd) = gs.cfg.commands.as_ref() {
+        if cmd.enabled.unwrap_or(true) {
+            if let Some(text) = msg.text() {
+                let prefix = cmd.prefix.clone().unwrap_or("/".into());
+                if text.starts_with(prefix.as_str()) {
+                    if cmd.admin_only.unwrap_or(true) {
+                        if let Some(from) = msg.from.as_ref() {
+                            if gs.admins.is_empty() {
+                                let _ = refresh_admins(bot, gs).await;
+                            }
+                            if !is_admin(gs, from.id).await {
+                                return Ok(());
+                            }
                         }
                     }
-                }
 
-                if text.starts_with("/ban") {
-                    if let Some(uid) = parse_ban_command(text) {
-                        let _ = apply_limit_action(
-                            bot,
-                            chat_id,
-                            uid,
-                            PunishmentAction::Kick,
-                            None,
-                            "manual /ban",
-                        )
-                        .await;
+                    if text.starts_with("/ban") {
+                        if let Some(uid) = parse_ban_command(text) {
+                            let _ = apply_limit_action(
+                                bot,
+                                chat_id,
+                                uid,
+                                PunishmentAction::Kick,
+                                None,
+                                "manual /ban",
+                            )
+                            .await;
+                        }
+                        return Ok(());
                     }
+
                     return Ok(());
                 }
-
-                return Ok(());
             }
         }
     }
