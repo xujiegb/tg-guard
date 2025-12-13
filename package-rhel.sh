@@ -69,13 +69,28 @@ sudo dnf -y install \
   shadow-utils \
   || die "dnf install failed"
 
+load_cargo_env() {
+  local env1="${CARGO_HOME:-$HOME/.cargo}/env"
+  local env2="$HOME/.cargo/env"
+  if [[ -f "$env1" ]]; then
+    source "$env1"
+    return 0
+  fi
+  if [[ -f "$env2" ]]; then
+    source "$env2"
+    return 0
+  fi
+  return 1
+}
+
 if ! command -v cargo >/dev/null 2>&1; then
   echo "[*] Installing Rust (rustup) for current user..."
   curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-  source "$HOME/.cargo/env"
+  load_cargo_env || true
 else
-  source "$HOME/.cargo/env" || true
+  load_cargo_env || true
 fi
+# -------------------------------------------------------------------------------
 
 need_cmd cargo
 need_cmd rustc
@@ -161,6 +176,27 @@ tar -C "${RPMTOP}/BUILD" -czf "$TARBALL" "${PKGNAME}-${VERSION}"
 SPEC="${RPMTOP}/SPECS/${PKGNAME}.spec"
 echo "[*] Generating spec: $SPEC"
 
+DOC_FILES=()
+for f in README README.md README.txt; do
+  [[ -f "${TOPBUILD}/${f}" ]] && DOC_FILES+=("$f")
+done
+
+LIC_FILES=()
+for f in LICENSE LICENSE.txt LICENSE.md COPYING NOTICE; do
+  [[ -f "${TOPBUILD}/${f}" ]] && LIC_FILES+=("$f")
+done
+
+DOC_LINE=""
+if [[ "${#DOC_FILES[@]}" -gt 0 ]]; then
+  DOC_LINE="%doc ${DOC_FILES[*]}"
+fi
+
+LIC_LINE=""
+if [[ "${#LIC_FILES[@]}" -gt 0 ]]; then
+  LIC_LINE="%license ${LIC_FILES[*]}"
+fi
+# -------------------------------------------------------------------------------
+
 cat > "$SPEC" <<EOF
 Name:           ${PKGNAME}
 Version:        ${VERSION}
@@ -220,8 +256,8 @@ exit 0
 %systemd_postun_with_restart %{name}.service
 
 %files
-%license LICENSE* NOTICE* COPYING* 2>/dev/null || :
-%doc README* 2>/dev/null || :
+${LIC_LINE}
+${DOC_LINE}
 %{_bindir}/%{name}
 %config(noreplace) %{_sysconfdir}/tg-guard/config.yaml
 %{_unitdir}/%{name}.service
