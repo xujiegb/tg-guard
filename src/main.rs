@@ -228,11 +228,10 @@ struct GroupConfig {
     chat_id: i64,
     ignore_admins: Option<bool>,
 
-    // ✅ 可有可无：不写就 None（不执行加群验证）
+
     #[serde(default)]
     join_verification: Option<JoinVerification>,
 
-    // ✅ 可有可无：不写就当 []
     #[serde(default)]
     auto_replies: Vec<TextRule>,
     #[serde(default)]
@@ -240,7 +239,6 @@ struct GroupConfig {
     #[serde(default)]
     kicks: Vec<KickRule>,
 
-    // ✅ 可有可无：不写就 None（不执行群命令）
     #[serde(default)]
     commands: Option<Commands>,
 }
@@ -1005,7 +1003,6 @@ async fn flush_group_notice(bot: &Bot, state: &AppState) -> Result<()> {
         let slowest = buf.users.last().map(|(_, n)| n.clone()).unwrap_or_default();
 
         if let Some(gs) = state.groups.get(gid) {
-            // ✅ 没有 join_verification 就不发入群验证提示
             let Some(jv) = gs.cfg.join_verification.as_ref() else {
                 buf.users.clear();
                 buf.last_sent = now;
@@ -1402,7 +1399,6 @@ async fn handle_callback_query(bot: &Bot, state: &AppState, q: CallbackQuery) ->
         return Ok(());
     };
 
-    // ✅ 没有 join_verification 就不处理回调
     let Some(jv) = gs.cfg.join_verification.as_ref() else {
         let _ = api_log(
             "answer_callback_query",
@@ -1486,7 +1482,6 @@ async fn handle_callback_query(bot: &Bot, state: &AppState, q: CallbackQuery) ->
 
 async fn apply_fail(bot: &Bot, gs: &GroupState, gid: ChatId, uid: UserId, why: &str) -> Result<()> {
     let Some(jv) = gs.cfg.join_verification.as_ref() else {
-        // 没有验证配置：理论上不会走到这里，直接静默
         return Ok(());
     };
 
@@ -1555,7 +1550,6 @@ async fn handle_group_message(bot: &Bot, state: &AppState, msg: &Message) -> Res
         }
     }
 
-    // ✅ commands 可选：不写就不处理任何群命令
     if let Some(cmd) = gs.cfg.commands.as_ref() {
         if cmd.enabled.unwrap_or(true) {
             if let Some(text) = msg.text() {
